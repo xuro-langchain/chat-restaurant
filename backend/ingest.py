@@ -1,8 +1,9 @@
 """Load html from files, clean up, split, ingest into Weaviate."""
 
-import logging
 import os
 import re
+import hashlib
+import logging
 from typing import Optional
 
 import weaviate
@@ -17,6 +18,7 @@ from pypdf.errors import PdfReadError
 import os
 from PIL import Image
 import io
+from langchain_community.document_loaders import PyPDFLoader
 
 from backend.constants import WEAVIATE_DOCS_INDEX_NAME
 from backend.embeddings import get_embeddings_model
@@ -60,42 +62,44 @@ def simple_extractor(html: str | BeautifulSoup) -> str:
 
 
 
-def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list[dict]:
-    """Load and split text from a PDF file for ingestion, extracting images and inserting Markdown links."""
+def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list:
     docs = []
-    os.makedirs(image_dir, exist_ok=True)
     try:
+        loader = PyPDFLoader(pdf_path)
+        langchain_docs = loader.load()
+        from pypdf import PdfReader
+        os.makedirs(image_dir, exist_ok=True)
         reader = PdfReader(pdf_path)
+        page_images = {}
+        # Get a safe base name for the document
+        doc_base = os.path.splitext(os.path.basename(pdf_path))[0]
         for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
             images = []
-            # Extract images from page
-            if "." in dir(page):  # Defensive: pypdf API may change
+            if hasattr(page, "images"):
                 for img_index, img in enumerate(getattr(page, "images", [])):
                     try:
                         img_data = img.data
+                        img_hash = hashlib.sha1(img_data).hexdigest()[:8]
                         img_ext = img.name.split(".")[-1] if "." in img.name else "png"
-                        img_filename = f"page-{i+1}-img-{img_index+1}.{img_ext}"
+                        img_filename = f"{doc_base}-p-{i+1}-i-{img_index+1}-{img_hash}.{img_ext}"
                         img_path = os.path.join(image_dir, img_filename)
                         with open(img_path, "wb") as f:
                             f.write(img_data)
-                        images.append((img_path, img_filename))
+                        images.append(img_path)
                     except Exception as e:
                         logger.error(f"Failed to extract image from page {i+1}: {e}")
-            # Insert Markdown image links at the end of the text (or customize as needed)
-            if images:
-                for img_path, img_filename in images:
-                    rel_path = os.path.relpath(img_path, start=os.path.dirname(__file__))
-                    text += f"\n\n![PDF Image]({rel_path})"
-            if text.strip():
-                docs.append({
-                    "page_content": text.strip(),
-                    "metadata": {"source": pdf_path, "page": i + 1, "title": f"PDF Page {i + 1}"}
-                })
-    except PdfReadError as e:
-        logger.error(f"Failed to load PDF: {e}")
+            page_images[i] = images
+        for doc in langchain_docs:
+            page_num = doc.metadata.get("page", None)
+            if page_num is not None:
+                images = page_images.get(page_num - 1, [])
+                if images:
+                    for img_path in images:
+                        rel_path = os.path.relpath(img_path, start=os.path.dirname(__file__))
+                        doc.page_content += f"\n\n![PDF Image]({rel_path})"
+            docs.append(doc)
     except Exception as e:
-        logger.error(f"Unexpected error loading PDF: {e}")
+        logger.error(f"Error loading PDF with PyPDFLoader and extracting images: {e}")
     return docs
 
 
@@ -128,17 +132,19 @@ def ingest_docs(pdf_path: str = None):
         if pdf_path:
             docs_from_pdf = load_pdf_report(pdf_path)
             logger.info(f"Loaded {len(docs_from_pdf)} docs from PDF: {pdf_path}")
-            docs_transformed = text_splitter.split_documents(docs_from_pdf)
-        docs_transformed = [
-            doc for doc in docs_transformed if len(doc["page_content"]) > 10
-        ]
+            docs_transformed = text_splitter.split_documents(docs_from_pdf) if docs_from_pdf else []
+            if not docs_transformed:
+                logger.error(f"No documents loaded from PDF: {pdf_path}. Ingestion aborted.")
+                return
+        else:
+            docs_transformed = []
 
         # Ensure required metadata fields
         for doc in docs_transformed:
-            if "source" not in doc["metadata"]:
-                doc["metadata"]["source"] = ""
-            if "title" not in doc["metadata"]:
-                doc["metadata"]["title"] = ""
+            if "source" not in doc.metadata:
+                doc.metadata["source"] = ""
+            if "title" not in doc.metadata:
+                doc.metadata["title"] = ""
 
         indexing_stats = index(
             docs_transformed,
@@ -161,5 +167,12 @@ def ingest_docs(pdf_path: str = None):
 
 
 if __name__ == "__main__":
-    # Example usage: ingest_docs("/path/to/your/report.pdf")
-    ingest_docs()
+    import sys
+    import glob
+    pdf_path = sys.argv[1] if len(sys.argv) > 1 else None
+    if pdf_path:
+        ingest_docs(pdf_path)
+    else:
+        pdf_files = glob.glob("assets/documents/*.pdf")
+        for path in pdf_files:
+            ingest_docs(path)
