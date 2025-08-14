@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from backend.retrieval_graph.configuration import AgentConfiguration
 from backend.retrieval_graph.researcher_graph.graph import graph as researcher_graph
 from backend.retrieval_graph.state import AgentState, InputState, Router
-from backend.utils import format_docs, load_chat_model
+from backend.utils import format_docs, load_chat_model, build_multimodal_messages
 
 
 async def analyze_and_route_query(
@@ -222,8 +222,14 @@ async def respond(
     context = format_docs(state.documents[:top_k])
     prompt = configuration.response_system_prompt.format(context=context)
     messages = [{"role": "system", "content": prompt}] + state.messages
-    response = await model.ainvoke(messages)
-    return {"messages": [response], "answer": response.content}
+
+    # If using OpenAI/gpt-4o, build multimodal message payload
+    if configuration.response_model.startswith("openai/gpt-4o"):
+        multimodal_payload = build_multimodal_messages(prompt)
+        response = await model.ainvoke(multimodal_payload)
+    else:
+        response = await model.ainvoke(messages)
+    return {"messages": [response], "answer": getattr(response, "content", str(response))}
 
 
 # Define the graph

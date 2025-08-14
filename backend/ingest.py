@@ -12,6 +12,11 @@ from langchain.indexes import SQLRecordManager, index
 from langchain.utils.html import PREFIXES_TO_IGNORE_REGEX, SUFFIXES_TO_IGNORE_REGEX
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_weaviate import WeaviateVectorStore
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+import os
+from PIL import Image
+import io
 
 from backend.constants import WEAVIATE_DOCS_INDEX_NAME
 from backend.embeddings import get_embeddings_model
@@ -42,50 +47,6 @@ def metadata_extractor(
     }
 
 
-def load_langchain_docs():
-    return SitemapLoader(
-        "https://python.langchain.com/sitemap.xml",
-        filter_urls=["https://python.langchain.com/"],
-        parsing_function=langchain_docs_extractor,
-        default_parser="lxml",
-        bs_kwargs={
-            "parse_only": SoupStrainer(
-                name=("article", "title", "html", "lang", "content")
-            ),
-        },
-        meta_function=metadata_extractor,
-    ).load()
-
-
-def load_langgraph_docs():
-    return SitemapLoader(
-        "https://langchain-ai.github.io/langgraph/sitemap.xml",
-        parsing_function=simple_extractor,
-        default_parser="lxml",
-        bs_kwargs={"parse_only": SoupStrainer(name=("article", "title"))},
-        meta_function=lambda meta, soup: metadata_extractor(
-            meta, soup, title_suffix=" | 🦜🕸️LangGraph"
-        ),
-    ).load()
-
-
-def load_langsmith_docs():
-    return RecursiveUrlLoader(
-        url="https://docs.smith.langchain.com/",
-        max_depth=8,
-        extractor=simple_extractor,
-        prevent_outside=True,
-        use_async=True,
-        timeout=600,
-        # Drop trailing / to avoid duplicate pages.
-        link_regex=(
-            f"href=[\"']{PREFIXES_TO_IGNORE_REGEX}((?:{SUFFIXES_TO_IGNORE_REGEX}.)*?)"
-            r"(?:[\#'\"]|\/[\#'\"])"
-        ),
-        check_response_status=True,
-    ).load()
-
-
 def simple_extractor(html: str | BeautifulSoup) -> str:
     if isinstance(html, str):
         soup = BeautifulSoup(html, "lxml")
@@ -98,28 +59,47 @@ def simple_extractor(html: str | BeautifulSoup) -> str:
     return re.sub(r"\n\n+", "\n\n", soup.text).strip()
 
 
-def load_api_docs():
-    return RecursiveUrlLoader(
-        url="https://api.python.langchain.com/en/latest/",
-        max_depth=8,
-        extractor=simple_extractor,
-        prevent_outside=True,
-        use_async=True,
-        timeout=600,
-        # Drop trailing / to avoid duplicate pages.
-        link_regex=(
-            f"href=[\"']{PREFIXES_TO_IGNORE_REGEX}((?:{SUFFIXES_TO_IGNORE_REGEX}.)*?)"
-            r"(?:[\#'\"]|\/[\#'\"])"
-        ),
-        check_response_status=True,
-        exclude_dirs=(
-            "https://api.python.langchain.com/en/latest/_sources",
-            "https://api.python.langchain.com/en/latest/_modules",
-        ),
-    ).load()
+
+def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list[dict]:
+    """Load and split text from a PDF file for ingestion, extracting images and inserting Markdown links."""
+    docs = []
+    os.makedirs(image_dir, exist_ok=True)
+    try:
+        reader = PdfReader(pdf_path)
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            images = []
+            # Extract images from page
+            if "." in dir(page):  # Defensive: pypdf API may change
+                for img_index, img in enumerate(getattr(page, "images", [])):
+                    try:
+                        img_data = img.data
+                        img_ext = img.name.split(".")[-1] if "." in img.name else "png"
+                        img_filename = f"page-{i+1}-img-{img_index+1}.{img_ext}"
+                        img_path = os.path.join(image_dir, img_filename)
+                        with open(img_path, "wb") as f:
+                            f.write(img_data)
+                        images.append((img_path, img_filename))
+                    except Exception as e:
+                        logger.error(f"Failed to extract image from page {i+1}: {e}")
+            # Insert Markdown image links at the end of the text (or customize as needed)
+            if images:
+                for img_path, img_filename in images:
+                    rel_path = os.path.relpath(img_path, start=os.path.dirname(__file__))
+                    text += f"\n\n![PDF Image]({rel_path})"
+            if text.strip():
+                docs.append({
+                    "page_content": text.strip(),
+                    "metadata": {"source": pdf_path, "page": i + 1, "title": f"PDF Page {i + 1}"}
+                })
+    except PdfReadError as e:
+        logger.error(f"Failed to load PDF: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error loading PDF: {e}")
+    return docs
 
 
-def ingest_docs():
+def ingest_docs(pdf_path: str = None):
     WEAVIATE_URL = os.environ["WEAVIATE_URL"]
     WEAVIATE_API_KEY = os.environ["WEAVIATE_API_KEY"]
     RECORD_MANAGER_DB_URL = os.environ["RECORD_MANAGER_DB_URL"]
@@ -145,33 +125,20 @@ def ingest_docs():
         )
         record_manager.create_schema()
 
-        docs_from_documentation = load_langchain_docs()
-        logger.info(f"Loaded {len(docs_from_documentation)} docs from documentation")
-        docs_from_api = load_api_docs()
-        logger.info(f"Loaded {len(docs_from_api)} docs from API")
-        docs_from_langsmith = load_langsmith_docs()
-        logger.info(f"Loaded {len(docs_from_langsmith)} docs from LangSmith")
-        docs_from_langgraph = load_langgraph_docs()
-        logger.info(f"Loaded {len(docs_from_langgraph)} docs from LangGraph")
-
-        docs_transformed = text_splitter.split_documents(
-            docs_from_documentation
-            + docs_from_api
-            + docs_from_langsmith
-            + docs_from_langgraph
-        )
+        if pdf_path:
+            docs_from_pdf = load_pdf_report(pdf_path)
+            logger.info(f"Loaded {len(docs_from_pdf)} docs from PDF: {pdf_path}")
+            docs_transformed = text_splitter.split_documents(docs_from_pdf)
         docs_transformed = [
-            doc for doc in docs_transformed if len(doc.page_content) > 10
+            doc for doc in docs_transformed if len(doc["page_content"]) > 10
         ]
 
-        # We try to return 'source' and 'title' metadata when querying vector store and
-        # Weaviate will error at query time if one of the attributes is missing from a
-        # retrieved document.
+        # Ensure required metadata fields
         for doc in docs_transformed:
-            if "source" not in doc.metadata:
-                doc.metadata["source"] = ""
-            if "title" not in doc.metadata:
-                doc.metadata["title"] = ""
+            if "source" not in doc["metadata"]:
+                doc["metadata"]["source"] = ""
+            if "title" not in doc["metadata"]:
+                doc["metadata"]["title"] = ""
 
         indexing_stats = index(
             docs_transformed,
@@ -194,4 +161,5 @@ def ingest_docs():
 
 
 if __name__ == "__main__":
+    # Example usage: ingest_docs("/path/to/your/report.pdf")
     ingest_docs()

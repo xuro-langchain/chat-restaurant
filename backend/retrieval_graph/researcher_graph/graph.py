@@ -16,6 +16,7 @@ from backend import retrieval
 from backend.retrieval_graph.configuration import AgentConfiguration
 from backend.retrieval_graph.researcher_graph.state import QueryState, ResearcherState
 from backend.utils import load_chat_model
+import asyncio
 
 
 async def generate_queries(
@@ -56,20 +57,12 @@ async def generate_queries(
 async def retrieve_documents(
     state: QueryState, *, config: RunnableConfig
 ) -> dict[str, list[Document]]:
-    """Retrieve documents based on a given query.
-
-    This function uses a retriever to fetch relevant documents for a given query.
-
-    Args:
-        state (QueryState): The current state containing the query string.
-        config (RunnableConfig): Configuration with the retriever used to fetch documents.
-
-    Returns:
-        dict[str, list[Document]]: A dictionary with a 'documents' key containing the list of retrieved documents.
-    """
-    with retrieval.make_retriever(config) as retriever:
-        response = await retriever.ainvoke(state.query, config)
-        return {"documents": response}
+    """Retrieve documents based on a given query, using a thread to avoid blocking the event loop."""
+    def blocking_retrieve():
+        with retrieval.make_retriever(config) as retriever:
+            return retriever.invoke(state.query, config)
+    response = await asyncio.to_thread(blocking_retrieve)
+    return {"documents": response}
 
 
 def retrieve_in_parallel(state: ResearcherState) -> list[Send]:

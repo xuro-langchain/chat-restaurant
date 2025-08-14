@@ -33,25 +33,6 @@ Here, you should see a "Connection string" section. Copy this string, and insert
 
 That's all you need to do for the record manager. The LangChain RecordManager API will handle creating tables for you.
 
-## Vercel (Frontend)
-
-First, build the frontend and confirm it's working locally:
-
-```shell
-cd frontend
-yarn
-yarn build
-```
-
-Then, create a Vercel account for hosting [here](https://vercel.com/signup).
-
-Once you've created your Vercel account, navigate to [your dashboard](https://vercel.com/) and click the button "Add New..." in the top right.
-This will open a dropdown. From there select "Project".
-
-On the next screen, search for "chat-langchain" (if you did not modify the repo name when forking). Once shown, click "Import".
-
-Finally, click "Deploy" and your frontend will be deployed!
-
 ## GitHub Action (Recurring Ingestion)
 
 Now, in order for your vector store to be updated with new data, you'll need to setup a recurring ingestion task (this will also populate the vector store for the first time).
@@ -66,7 +47,7 @@ When configuring, click "Add secret" and add the following secrets:
 OPENAI_API_KEY=
 RECORD_MANAGER_DB_URL=
 WEAVIATE_API_KEY=
-WEAVIATE_INDEX_NAME=langchain
+WEAVIATE_INDEX_NAME=chat-restaurant
 WEAVIATE_URL=
 ```
 
@@ -80,16 +61,4 @@ Once this has finished you can visit your production URL from Vercel, and start 
 
 ## Run and deploy backend API server
 
-If you have a valid LangGraph Cloud [license key](https://langchain-ai.github.io/langgraph/cloud/deployment/self_hosted/), you can run a fully functional LangGraph server locally with a `langgraph up` command. Otherwise, you can use `langgraph test` to test that the API server is functional.
-
-> [!NOTE]
-> When running `langgraph test`, you will only be able to [create stateless runs](https://langchain-ai.github.io/langgraph/cloud/how-tos/cloud_examples/stateless_runs/), and the previous chats functionality will not be available.
-
-Once you confirm that the server is working locally, you can deploy your app with [LangGraph Cloud](https://langchain-ai.github.io/langgraph/cloud/).
-
-## Connect to the backend API (LangGraph Cloud)
-
-In Vercel add the following environment variables:
-- `API_BASE_URL` that matches your LangGraph Cloud deployment API URL
-- `NEXT_PUBLIC_API_URL` - API URL that LangGraph Cloud deployment is proxied to, e.g. "https://chat.langchain.com/api"
-- `LANGCHAIN_API_KEY` - LangSmith API key
+If you have a valid LangGraph Platform [license key](https://langchain-ai.github.io/langgraph/cloud/deployment/self_hosted/), you can deploy your graph. Locally, you can run a fully functional LangGraph server locally with a `langgraph dev` command. 

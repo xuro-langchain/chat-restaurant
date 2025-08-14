@@ -7,6 +7,8 @@ Functions:
 
 import uuid
 from typing import Any, Literal, Optional, Union
+import re
+import os
 
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
@@ -144,3 +146,28 @@ def reduce_docs(
                     existing_ids.add(item_id)
 
     return existing_list + new_list
+
+
+def build_multimodal_messages(xml_context: str) -> list:
+    """
+    Parse XML context, extract text and Markdown image links, and build a multimodal message payload for OpenAI GPT-4o.
+    Returns a list of dicts: [{"type": "text", "text": ...}, {"type": "image_url", "image_url": ...}, ...]
+    """
+    # Split on Markdown image links: ![alt](path)
+    pattern = r'!\[[^\]]*\]\(([^)]+)\)'
+    parts = re.split(pattern, xml_context)
+    matches = re.findall(pattern, xml_context)
+    messages = []
+    for i, part in enumerate(parts):
+        if part.strip():
+            messages.append({"type": "text", "text": part})
+        if i < len(matches):
+            image_path = matches[i]
+            # For local dev, use file:// URLs; for prod, swap to S3 URLs
+            if image_path.startswith("http://") or image_path.startswith("https://"):
+                messages.append({"type": "image_url", "image_url": image_path})
+            else:
+                # Convert to absolute file URL for OpenAI API
+                abs_path = os.path.abspath(image_path)
+                messages.append({"type": "image_url", "image_url": f"file://{abs_path}"})
+    return messages
