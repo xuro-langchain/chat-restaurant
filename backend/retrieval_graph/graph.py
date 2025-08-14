@@ -7,6 +7,7 @@ conducting research, and formulating responses.
 """
 
 from typing import Any, Literal, TypedDict, cast
+import asyncio
 
 from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
@@ -225,8 +226,8 @@ async def respond(
 
     # If using OpenAI/gpt-4o, build multimodal message payload
     if configuration.response_model.startswith("openai/gpt-4o"):
-        multimodal_payload = build_multimodal_messages(prompt)
-        response = await model.ainvoke(multimodal_payload)
+        openai_messages = await asyncio.to_thread(build_multimodal_messages, prompt)
+        response = await model.ainvoke(openai_messages)
     else:
         response = await model.ainvoke(messages)
     return {"messages": [response], "answer": getattr(response, "content", str(response))}

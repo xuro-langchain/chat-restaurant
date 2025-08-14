@@ -19,6 +19,11 @@ import os
 from PIL import Image
 import io
 from langchain_community.document_loaders import PyPDFLoader
+import mimetypes
+try:
+    import boto3  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    boto3 = None
 
 from backend.constants import WEAVIATE_DOCS_INDEX_NAME
 from backend.embeddings import get_embeddings_model
@@ -85,7 +90,9 @@ def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list:
                         img_path = os.path.join(image_dir, img_filename)
                         with open(img_path, "wb") as f:
                             f.write(img_data)
-                        images.append(img_path)
+                        # Optionally upload to S3 and use a public URL
+                        uploaded_url = _upload_image_to_s3(img_path)
+                        images.append(uploaded_url or img_path)
                     except Exception as e:
                         logger.error(f"Failed to extract image from page {i+1}: {e}")
             page_images[i] = images
@@ -95,12 +102,71 @@ def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list:
                 images = page_images.get(page_num - 1, [])
                 if images:
                     for img_path in images:
-                        rel_path = os.path.relpath(img_path, start=os.path.dirname(__file__))
-                        doc.page_content += f"\n\n![PDF Image]({rel_path})"
+                        # If upload produced a URL, prefer it; else fall back to relative local path
+                        if isinstance(img_path, str) and (img_path.startswith("http://") or img_path.startswith("https://")):
+                            doc.page_content += f"\n\n![PDF Image]({img_path})"
+                        else:
+                            rel_path = os.path.relpath(str(img_path), start=os.path.dirname(__file__))
+                            doc.page_content += f"\n\n![PDF Image]({rel_path})"
             docs.append(doc)
     except Exception as e:
         logger.error(f"Error loading PDF with PyPDFLoader and extracting images: {e}")
     return docs
+
+
+def _upload_image_to_s3(local_path: str) -> Optional[str]:
+    """Upload an image to S3 if environment is configured, returning the public URL.
+
+    Config via env vars:
+    - IMAGE_UPLOAD_PROVIDER: set to 's3' to enable S3 uploads
+    - IMAGE_S3_BUCKET: target S3 bucket name (required when provider is s3)
+    - IMAGE_S3_REGION: AWS region, default 'us-east-1'
+    - IMAGE_S3_PREFIX: key prefix within bucket, default 'assets/images/'
+    - IMAGE_BASE_URL: optional public base URL (e.g., CloudFront). If provided, returned URL is IMAGE_BASE_URL + key
+    - IMAGE_S3_PUBLIC_READ: if 'true' (default), set ACL public-read on uploaded object
+    """
+    provider = (os.environ.get("IMAGE_UPLOAD_PROVIDER") or "").lower()
+    if provider != "s3":
+        return None
+    if boto3 is None:
+        logger.error("IMAGE_UPLOAD_PROVIDER is 's3' but boto3 is not installed. Add 'boto3' to dependencies.")
+        return None
+
+    bucket = os.environ.get("IMAGE_S3_BUCKET")
+    if not bucket:
+        logger.error("IMAGE_S3_BUCKET is not set; skipping image upload.")
+        return None
+
+    region = os.environ.get("IMAGE_S3_REGION", "us-east-1")
+    prefix = os.environ.get("IMAGE_S3_PREFIX", "assets/images/")
+    base_url = os.environ.get("IMAGE_BASE_URL")
+    public_read = (os.environ.get("IMAGE_S3_PUBLIC_READ", "true").lower() == "true")
+
+    key = f"{prefix}{os.path.basename(local_path)}"
+    extra_args: dict[str, Any] = {}
+    if public_read:
+        extra_args["ACL"] = "public-read"
+    content_type, _ = mimetypes.guess_type(local_path)
+    if content_type:
+        extra_args["ContentType"] = content_type
+    try:
+        s3 = boto3.client("s3", region_name=region)
+        if extra_args:
+            s3.upload_file(local_path, bucket, key, ExtraArgs=extra_args)
+        else:
+            s3.upload_file(local_path, bucket, key)
+    except Exception as e:
+        logger.error(f"Failed to upload image to S3: {e}")
+        return None
+
+    if base_url:
+        base = base_url if base_url.endswith("/") else base_url + "/"
+        return f"{base}{key}"
+
+    # Construct standard S3 URL
+    if region == "us-east-1":
+        return f"https://{bucket}.s3.amazonaws.com/{key}"
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
 
 
 def ingest_docs(pdf_path: str = None):

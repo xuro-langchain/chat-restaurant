@@ -9,11 +9,16 @@ import uuid
 from typing import Any, Literal, Optional, Union
 import re
 import os
+import base64
+import mimetypes
+import logging
 
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 
+
+logger = logging.getLogger(__name__)
 
 def _format_doc(doc: Document) -> str:
     """Format a single document as XML.
@@ -148,26 +153,79 @@ def reduce_docs(
     return existing_list + new_list
 
 
-def build_multimodal_messages(xml_context: str) -> list:
+def build_multimodal_messages(xml_context: str) -> list[dict[str, Any]]:
     """
-    Parse XML context, extract text and Markdown image links, and build a multimodal message payload for OpenAI GPT-4o.
-    Returns a list of dicts: [{"type": "text", "text": ...}, {"type": "image_url", "image_url": ...}, ...]
+    Build a valid OpenAI chat 'messages' list from a text context that may include Markdown images.
+
+    Output format:
+    [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "..."},
+          {"type": "image_url", "image_url": {"url": "https://... or file://..."}},
+          ...
+        ]
+      }
+    ]
     """
     # Split on Markdown image links: ![alt](path)
     pattern = r'!\[[^\]]*\]\(([^)]+)\)'
     parts = re.split(pattern, xml_context)
     matches = re.findall(pattern, xml_context)
-    messages = []
+
+    content_parts: list[dict[str, Any]] = []
     for i, part in enumerate(parts):
         if part.strip():
-            messages.append({"type": "text", "text": part})
+            content_parts.append({"type": "text", "text": part})
         if i < len(matches):
             image_path = matches[i]
-            # For local dev, use file:// URLs; for prod, swap to S3 URLs
+            # Prefer remote URLs as-is
             if image_path.startswith("http://") or image_path.startswith("https://"):
-                messages.append({"type": "image_url", "image_url": image_path})
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_path},
+                })
             else:
-                # Convert to absolute file URL for OpenAI API
-                abs_path = os.path.abspath(image_path)
-                messages.append({"type": "image_url", "image_url": f"file://{abs_path}"})
-    return messages
+                # Embed local images as data URLs (base64) per OpenAI vision format
+                candidate_paths = []
+                # 1) As provided (relative to CWD)
+                candidate_paths.append(os.path.abspath(image_path))
+                # 2) Relative to this file's directory
+                candidate_paths.append(os.path.abspath(os.path.join(os.path.dirname(__file__), image_path)))
+                # 3) Project root guess (two levels up from backend/)
+                candidate_paths.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", image_path)))
+
+                chosen_path: Optional[str] = None
+                for p in candidate_paths:
+                    if os.path.exists(p):
+                        chosen_path = p
+                        break
+
+                if chosen_path is not None:
+                    try:
+                        with open(chosen_path, "rb") as f:
+                            data = f.read()
+                        mime, _ = mimetypes.guess_type(chosen_path)
+                        if not mime:
+                            mime = "image/png"
+                        b64 = base64.b64encode(data).decode("utf-8")
+                        data_url = f"data:{mime};base64,{b64}"
+                        content_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        })
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to read local image for embedding: %s (error: %s)",
+                            chosen_path,
+                            e,
+                        )
+                else:
+                    logger.warning(
+                        "Local image not found. Searched candidates: %s (from markdown path: %s)",
+                        candidate_paths,
+                        image_path,
+                    )
+
+    return [{"role": "user", "content": content_parts}]
