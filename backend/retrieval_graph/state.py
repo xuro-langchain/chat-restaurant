@@ -63,7 +63,7 @@ class Router(TypedDict):
     """Classify user query."""
 
     logic: str
-    type: Literal["more-info", "langchain", "general"]
+    type: Literal["more-info", "restaurant", "general"]
 
 
 # This is the primary state of your agent, where you can store any information

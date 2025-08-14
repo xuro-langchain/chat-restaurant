@@ -31,41 +31,41 @@ class AgentConfiguration(BaseConfiguration):
     # prompts
 
     router_system_prompt: str = field(
-        default=prompts.ROUTER_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.ROUTER_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for classifying user questions to route them to the correct node."
         },
     )
 
     more_info_system_prompt: str = field(
-        default=prompts.MORE_INFO_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.MORE_INFO_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for asking for more information from the user."
         },
     )
 
     general_system_prompt: str = field(
-        default=prompts.GENERAL_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.GENERAL_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for responding to general questions."
         },
     )
 
     research_plan_system_prompt: str = field(
-        default=prompts.RESEARCH_PLAN_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.RESEARCH_PLAN_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for generating a research plan based on the user's question."
         },
     )
 
     generate_queries_system_prompt: str = field(
-        default=prompts.GENERATE_QUERIES_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.GENERATE_QUERIES_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used by the researcher to generate queries based on a step in the research plan."
         },
     )
 
     response_system_prompt: str = field(
-        default=prompts.RESPONSE_SYSTEM_PROMPT,
+        default_factory=lambda: prompts.RESPONSE_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={"description": "The system prompt used for generating responses."},
     )
