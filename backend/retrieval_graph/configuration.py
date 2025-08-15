@@ -30,24 +30,17 @@ class AgentConfiguration(BaseConfiguration):
 
     # prompts
 
-    router_system_prompt: str = field(
-        default_factory=lambda: prompts.ROUTER_SYSTEM_PROMPT.messages[0].prompt.template,
+    guardrail_system_prompt: str = field(
+        default_factory=lambda: prompts.GUARDRAIL_SYSTEM_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for classifying user questions to route them to the correct node."
         },
     )
 
-    more_info_system_prompt: str = field(
-        default_factory=lambda: prompts.MORE_INFO_SYSTEM_PROMPT.messages[0].prompt.template,
+    guardrail_response_prompt: str = field(
+        default_factory=lambda: prompts.GUARDRAIL_RESPONSE_PROMPT.messages[0].prompt.template,
         metadata={
             "description": "The system prompt used for asking for more information from the user."
-        },
-    )
-
-    general_system_prompt: str = field(
-        default_factory=lambda: prompts.GENERAL_SYSTEM_PROMPT.messages[0].prompt.template,
-        metadata={
-            "description": "The system prompt used for responding to general questions."
         },
     )
 
