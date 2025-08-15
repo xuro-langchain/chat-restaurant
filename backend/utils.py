@@ -12,6 +12,9 @@ import os
 import base64
 import mimetypes
 import logging
+from io import BytesIO
+from PIL import Image
+import re as _re
 
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
@@ -153,79 +156,114 @@ def reduce_docs(
     return existing_list + new_list
 
 
-def build_multimodal_messages(xml_context: str) -> list[dict[str, Any]]:
+def build_multimodal_messages(system_prompt_with_context: str, history_messages: list[Any]) -> list[dict[str, Any]]:
     """
-    Build a valid OpenAI chat 'messages' list from a text context that may include Markdown images.
+    Build a valid OpenAI chat 'messages' list preserving:
+    - System message (instructions) as a true system role
+    - Original conversation history as-is
+    - Context (including Markdown images) as a separate user message with text+image parts
 
-    Output format:
-    [
-      {
-        "role": "user",
-        "content": [
-          {"type": "text", "text": "..."},
-          {"type": "image_url", "image_url": {"url": "https://... or file://..."}},
-          ...
-        ]
-      }
-    ]
+    The function extracts the <context>...</context> block from the system prompt and moves it
+    into a user multimodal message. Local images are downscaled and JPEG-compressed, embedded as base64.
     """
-    # Split on Markdown image links: ![alt](path)
-    pattern = r'!\[[^\]]*\]\(([^)]+)\)'
-    parts = re.split(pattern, xml_context)
-    matches = re.findall(pattern, xml_context)
+    # 1) Split the instructions vs. context
+    context_match = _re.search(r"<context>([\s\S]*?)<context/>", system_prompt_with_context)
+    context_text = context_match.group(1) if context_match else ""
+    system_text = _re.sub(r"<context>[\s\S]*?<context/>", "", system_prompt_with_context).strip()
+
+    # 2) Convert LangChain messages to OpenAI message dicts, preserving order
+    role_map = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
+    converted_history: list[dict[str, Any]] = []
+    for m in history_messages or []:
+        role = getattr(m, "type", None)
+        content = getattr(m, "content", None)
+        if role in role_map and content is not None:
+            converted_history.append({"role": role_map[role], "content": content})
+
+    # 3) Build multimodal content from context_text
+    # Match Markdown image links: ![alt](path)
+    pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+
+    MAX_IMAGES = 12
+    TARGET_MAX_IMAGE_BYTES = 600 * 1024  # ~600KB per image
+    MIN_JPEG_QUALITY = 35
+    START_JPEG_QUALITY = 78
 
     content_parts: list[dict[str, Any]] = []
-    for i, part in enumerate(parts):
-        if part.strip():
-            content_parts.append({"type": "text", "text": part})
-        if i < len(matches):
-            image_path = matches[i]
-            # Prefer remote URLs as-is
-            if image_path.startswith("http://") or image_path.startswith("https://"):
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": image_path},
-                })
+    images_added = 0
+    last_idx = 0
+    for match in _re.finditer(pattern, context_text):
+        start, end = match.span()
+        # Add text before the image (without the markdown image itself)
+        pre = context_text[last_idx:start]
+        if pre.strip():
+            content_parts.append({"type": "text", "text": pre})
+
+        alt_text, image_path = match.group(1), match.group(2)
+        if images_added >= MAX_IMAGES:
+            logger.warning("Skipping image due to MAX_IMAGES limit: %s", image_path)
+            last_idx = end
+            continue
+        # Optionally include alt text to aid model understanding
+        if alt_text.strip():
+            content_parts.append({"type": "text", "text": f"Image: {alt_text}"})
+
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            content_parts.append({"type": "image_url", "image_url": {"url": image_path}})
+            images_added += 1
+        else:
+            candidate_paths = [
+                os.path.abspath(image_path),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), image_path)),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", image_path)),
+            ]
+            chosen_path: Optional[str] = None
+            for p in candidate_paths:
+                if os.path.exists(p):
+                    chosen_path = p
+                    break
+            if chosen_path is not None:
+                try:
+                    with Image.open(chosen_path) as im:
+                        if im.mode in ("RGBA", "LA"):
+                            background = Image.new("RGB", im.size, (255, 255, 255))
+                            background.paste(im, mask=im.split()[-1])
+                            im = background
+                        elif im.mode != "RGB":
+                            im = im.convert("RGB")
+                        max_side = 1280
+                        w, h = im.size
+                        scale = min(1.0, max_side / float(max(w, h)))
+                        if scale < 1.0:
+                            im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                        quality = START_JPEG_QUALITY
+                        buffer = BytesIO()
+                        im.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+                        while buffer.tell() > TARGET_MAX_IMAGE_BYTES and quality > MIN_JPEG_QUALITY:
+                            quality = max(MIN_JPEG_QUALITY, quality - 8)
+                            buffer.seek(0)
+                            buffer.truncate(0)
+                            im.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+                        data = buffer.getvalue()
+                    mime = "image/jpeg"
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    data_url = f"data:{mime};base64,{b64}"
+                    content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                    images_added += 1
+                except Exception as e:
+                    logger.warning("Failed to read local image for embedding: %s (error: %s)", chosen_path, e)
             else:
-                # Embed local images as data URLs (base64) per OpenAI vision format
-                candidate_paths = []
-                # 1) As provided (relative to CWD)
-                candidate_paths.append(os.path.abspath(image_path))
-                # 2) Relative to this file's directory
-                candidate_paths.append(os.path.abspath(os.path.join(os.path.dirname(__file__), image_path)))
-                # 3) Project root guess (two levels up from backend/)
-                candidate_paths.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", image_path)))
+                logger.warning("Local image not found. Searched candidates: %s (from markdown path: %s)", candidate_paths, image_path)
+        last_idx = end
 
-                chosen_path: Optional[str] = None
-                for p in candidate_paths:
-                    if os.path.exists(p):
-                        chosen_path = p
-                        break
+    # Trailing text after the last image
+    tail = context_text[last_idx:]
+    if tail.strip():
+        content_parts.append({"type": "text", "text": tail})
 
-                if chosen_path is not None:
-                    try:
-                        with open(chosen_path, "rb") as f:
-                            data = f.read()
-                        mime, _ = mimetypes.guess_type(chosen_path)
-                        if not mime:
-                            mime = "image/png"
-                        b64 = base64.b64encode(data).decode("utf-8")
-                        data_url = f"data:{mime};base64,{b64}"
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": data_url},
-                        })
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to read local image for embedding: %s (error: %s)",
-                            chosen_path,
-                            e,
-                        )
-                else:
-                    logger.warning(
-                        "Local image not found. Searched candidates: %s (from markdown path: %s)",
-                        candidate_paths,
-                        image_path,
-                    )
-
-    return [{"role": "user", "content": content_parts}]
+    # 4) Assemble final OpenAI messages
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_text}]
+    messages.extend(converted_history)
+    if content_parts:
+        messages.append({"role": "user", "content": content_parts})
+    return messages

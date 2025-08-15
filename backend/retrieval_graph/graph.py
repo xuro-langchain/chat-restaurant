@@ -134,7 +134,8 @@ async def respond(
 
     # If using OpenAI/gpt-4o, build multimodal message payload
     if configuration.response_model.startswith("openai/gpt-4o"):
-        openai_messages = await asyncio.to_thread(build_multimodal_messages, prompt)
+        # Build messages preserving system and history; move context (with images) into a multimodal user message
+        openai_messages = await asyncio.to_thread(build_multimodal_messages, prompt, state.messages)
         response = await model.ainvoke(openai_messages)
     else:
         response = await model.ainvoke(messages)
