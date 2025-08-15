@@ -76,6 +76,7 @@ def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list:
         os.makedirs(image_dir, exist_ok=True)
         reader = PdfReader(pdf_path)
         page_images = {}
+        seen_hash_to_path: dict[str, str] = {}
         # Get a safe base name for the document
         doc_base = os.path.splitext(os.path.basename(pdf_path))[0]
         for i, page in enumerate(reader.pages):
@@ -84,13 +85,20 @@ def load_pdf_report(pdf_path: str, image_dir: str = "assets/images") -> list:
                 for img_index, img in enumerate(getattr(page, "images", [])):
                     try:
                         img_data = img.data
-                        img_hash = hashlib.sha1(img_data).hexdigest()[:8]
+                        img_hash = hashlib.sha1(img_data).hexdigest()[:16]
                         img_ext = img.name.split(".")[-1] if "." in img.name else "png"
-                        img_filename = f"{doc_base}-p-{i+1}-i-{img_index+1}-{img_hash}.{img_ext}"
+                        # Deduplicate across the entire document by hash
+                        if img_hash in seen_hash_to_path:
+                            dedup_path = seen_hash_to_path[img_hash]
+                            uploaded_url = _upload_image_to_s3(dedup_path)
+                            images.append(uploaded_url or dedup_path)
+                            continue
+                        img_filename = f"{doc_base}-{img_hash}.{img_ext}"
                         img_path = os.path.join(image_dir, img_filename)
-                        with open(img_path, "wb") as f:
-                            f.write(img_data)
-                        # Optionally upload to S3 and use a public URL
+                        if not os.path.exists(img_path):
+                            with open(img_path, "wb") as f:
+                                f.write(img_data)
+                        seen_hash_to_path[img_hash] = img_path
                         uploaded_url = _upload_image_to_s3(img_path)
                         images.append(uploaded_url or img_path)
                     except Exception as e:
@@ -205,12 +213,12 @@ def ingest_docs(pdf_path: str = None):
         else:
             docs_transformed = []
 
-        # Ensure required metadata fields
+        # Ensure required metadata fields and drop problematic/non-whitelisted keys
         for doc in docs_transformed:
-            if "source" not in doc.metadata:
-                doc.metadata["source"] = ""
-            if "title" not in doc.metadata:
-                doc.metadata["title"] = ""
+            source_val = doc.metadata.get("source", "")
+            title_val = doc.metadata.get("title", "")
+            # Only keep whitelisted keys to avoid Weaviate schema conflicts (e.g., creationdate)
+            doc.metadata = {"source": source_val, "title": title_val}
 
         indexing_stats = index(
             docs_transformed,
